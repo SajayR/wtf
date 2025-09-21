@@ -17,7 +17,7 @@ import numpy as np
 import tensorflow as tf
 from flask import Flask, jsonify, request
 
-# DO NOT import db here. This is the source of the circular import.
+# DO NOT import db here. This was the source of the circular import.
 # from . import db 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,8 +34,8 @@ model_lock = threading.Lock()
 model = None
 threshold = 0.5
 inv_label_map: Dict[int, str] = {0: "no", 1: "yes"}
-CLASS_MAP: Dict[str, int] = {"no": 0, "yes": 1} # Define it here
-IMG_SIZE = 224 # Define it here
+CLASS_MAP: Dict[str, int] = {"no": 0, "yes": 1}
+IMG_SIZE = 224
 
 def _load_label_map() -> None:
     """Load label map from file if available."""
@@ -44,10 +44,8 @@ def _load_label_map() -> None:
         with LABEL_MAP_FILE.open() as fh:
             loaded = json.load(fh)
         inv_label_map = {int(k): v for k, v in loaded.items()}
-        # Re-create CLASS_MAP from the loaded inverse map
         CLASS_MAP = {v: k for k, v in inv_label_map.items()}
     else:
-        # Fallback
         inv_label_map = {0: "no", 1: "yes"}
         CLASS_MAP = {"no": 0, "yes": 1}
 
@@ -58,16 +56,12 @@ def load_model_artifacts() -> None:
     if not MODEL_FILE.exists():
         raise FileNotFoundError(f"Model file not found at {MODEL_FILE}. Run training first.")
     
-    # --- THIS IMPORT WAS MISSING ---
-    # Keras needs this to load the model successfully
-    try:
-        from ml.train import preprocess_input
-    except ImportError:
-        print("ERROR: Could not import preprocess_input from ml.train")
-        # Handle error or re-raise
+    # --- THIS IS THE FIX FOR THE *NEXT* ERROR ---
+    # We must import the custom function your model uses
+    from ml.train import preprocess_input
     
     with model_lock:
-        # Pass the custom function to load_model
+        # And we must tell Keras about it
         custom_objects = {'preprocess_input': preprocess_input}
         model = tf.keras.models.load_model(MODEL_FILE, custom_objects=custom_objects)
         
@@ -91,7 +85,6 @@ def decode_base64_image(data: str) -> bytes:
 
 def image_bytes_to_tensor(image_bytes: bytes) -> np.ndarray:
     """Convert raw image bytes into model-ready numpy array."""
-    # Import here to ensure ml.train is available
     from ml.train import preprocess_input
     
     img = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
@@ -120,7 +113,8 @@ def create_app(*args, **kwargs) -> Flask:
     
     app = Flask(__name__) # Create the app instance HERE
     
-    # Import db here, inside the factory
+    # --- THIS IS THE FIX FOR THE CIRCULAR IMPORT ---
+    # We import db *inside* the factory, not at the top of the file
     from . import db
 
     # --- Register Routes with the app instance ---
@@ -141,7 +135,6 @@ def create_app(*args, **kwargs) -> Flask:
         image_bytes = decode_base64_image(payload["image"])
         arr = image_bytes_to_tensor(image_bytes)
         with model_lock:
-            # Check model is not None again inside lock for safety
             if model is None:
                 return jsonify({"error": "model not loaded"}), 503
             probs = model.predict(arr, verbose=0).flatten()
@@ -190,6 +183,7 @@ def create_app(*args, **kwargs) -> Flask:
             app.logger.warning("Failed to reload artifacts: %s", exc)
             return jsonify({"error": "model artifacts not found, training may still be in progress"}), 503
         except Exception as exc:
+            # Add exc_info=True to log the full traceback
             app.logger.error("An unexpected error occurred during model reload: %s", exc, exc_info=True)
             return jsonify({"error": str(exc)}), 500
 
@@ -203,6 +197,7 @@ def create_app(*args, **kwargs) -> Flask:
         except FileNotFoundError as exc:
             app.logger.warning("model not loaded on startup: %s", exc)
         except Exception as exc:
+            # Add exc_info=True to log the full traceback
             app.logger.error("Failed to load model on startup: %s", exc, exc_info=True)
     
     return app
