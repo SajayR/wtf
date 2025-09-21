@@ -12,12 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --upgrade pip \
-    && pip install -r requirements.txt
+    && pip install uv \
+    && uv pip install -r requirements.txt
 
 COPY api ./api
 COPY ml ./ml
 COPY data ./data
+COPY pipelines ./pipelines
 COPY scripts ./scripts
+
+RUN python -m pipelines.compile || true
 
 EXPOSE 6000
 

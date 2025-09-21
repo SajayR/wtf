@@ -3,7 +3,8 @@ kind: CronJob
 metadata:
   name: brain-retrainer
 spec:
-  schedule: "*/30 * * * *"
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
   jobTemplate:
     spec:
       template:
@@ -14,7 +15,7 @@ spec:
               image: brain-tumor/api:latest
               command:
                 - python
-                - ml/retrain.py
+                - ml/submit_kfp.py
               envFrom:
                 - configMapRef:
                     name: brain-api-config

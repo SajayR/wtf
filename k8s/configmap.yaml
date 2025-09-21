@@ -9,3 +9,14 @@ data:
   WEAK_FEEDBACK_DIR: /app/data/weak_feedback
   RETRAIN_SCRIPT: ml/retrain.py
   RETRAIN_THRESHOLD: "5"
+  KFP_HOST: http://ml-pipeline.kubeflow.svc.cluster.local:8888
+  KFP_NAMESPACE: kubeflow
+  KFP_EXPERIMENT: brain-tumor
+  PIPELINE_SPEC: /app/pipelines/brain_tumor_pipeline.yaml
+  PIPELINE_IMAGE: brain-tumor/api:latest
+  EPOCHS: "3"
+  BATCH_SIZE: "16"
+  MIN_AUC: "0.70"
+  METRIC_DROP_TOL: "0.02"
+  ARTIFACTS_PVC: brain-artifacts
+  FEEDBACK_PVC: brain-feedback

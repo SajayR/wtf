@@ -1,0 +1,144 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: brain-tumor-retrain-
+  annotations: {pipelines.kubeflow.org/kfp_sdk_version: 1.8.22, pipelines.kubeflow.org/pipeline_compilation_time: '2025-09-19T11:27:40.927168',
+    pipelines.kubeflow.org/pipeline_spec: '{"inputs": [{"default": "brain-tumor/api:latest",
+      "name": "image", "optional": true, "type": "String"}, {"default": "brain-artifacts",
+      "name": "artifacts_pvc", "optional": true, "type": "String"}, {"default": "brain-feedback",
+      "name": "feedback_pvc", "optional": true, "type": "String"}, {"default": "3",
+      "name": "epochs", "optional": true, "type": "Integer"}, {"default": "16", "name":
+      "batch_size", "optional": true, "type": "Integer"}, {"default": "0.02", "name":
+      "metric_drop_tol", "optional": true, "type": "Float"}, {"default": "0.7", "name":
+      "min_auc", "optional": true, "type": "Float"}], "name": "brain-tumor-retrain"}'}
+  labels: {pipelines.kubeflow.org/kfp_sdk_version: 1.8.22}
+spec:
+  entrypoint: brain-tumor-retrain
+  templates:
+  - name: brain-tumor-retrain
+    inputs:
+      parameters:
+      - {name: artifacts_pvc}
+      - {name: batch_size}
+      - {name: epochs}
+      - {name: feedback_pvc}
+      - {name: image}
+      - {name: metric_drop_tol}
+      - {name: min_auc}
+    dag:
+      tasks:
+      - name: evaluate-metrics
+        template: evaluate-metrics
+        dependencies: [train-model]
+        arguments:
+          parameters:
+          - {name: artifacts_pvc, value: '{{inputs.parameters.artifacts_pvc}}'}
+          - {name: feedback_pvc, value: '{{inputs.parameters.feedback_pvc}}'}
+          - {name: image, value: '{{inputs.parameters.image}}'}
+          - {name: metric_drop_tol, value: '{{inputs.parameters.metric_drop_tol}}'}
+          - {name: min_auc, value: '{{inputs.parameters.min_auc}}'}
+      - name: promote-model
+        template: promote-model
+        dependencies: [evaluate-metrics]
+        arguments:
+          parameters:
+          - {name: artifacts_pvc, value: '{{inputs.parameters.artifacts_pvc}}'}
+          - {name: feedback_pvc, value: '{{inputs.parameters.feedback_pvc}}'}
+          - {name: image, value: '{{inputs.parameters.image}}'}
+      - name: train-model
+        template: train-model
+        arguments:
+          parameters:
+          - {name: artifacts_pvc, value: '{{inputs.parameters.artifacts_pvc}}'}
+          - {name: batch_size, value: '{{inputs.parameters.batch_size}}'}
+          - {name: epochs, value: '{{inputs.parameters.epochs}}'}
+          - {name: feedback_pvc, value: '{{inputs.parameters.feedback_pvc}}'}
+          - {name: image, value: '{{inputs.parameters.image}}'}
+  - name: evaluate-metrics
+    container:
+      command: [python, ml/check_metrics.py, --metrics, /app/ml/artifacts/kfp_run/metrics.json,
+        --state, /app/ml/artifacts/state.json, --min_auc, '{{inputs.parameters.min_auc}}',
+        --drop_tol, '{{inputs.parameters.metric_drop_tol}}']
+      image: '{{inputs.parameters.image}}'
+      volumeMounts:
+      - {mountPath: /app/ml/artifacts, name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8}
+      - {mountPath: /app/data/weak_feedback, name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc}
+    inputs:
+      parameters:
+      - {name: artifacts_pvc}
+      - {name: feedback_pvc}
+      - {name: image}
+      - {name: metric_drop_tol}
+      - {name: min_auc}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.22
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+    volumes:
+    - name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.artifacts_pvc}}'}
+    - name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.feedback_pvc}}'}
+  - name: promote-model
+    container:
+      command: [python, ml/promote_model.py, --source, /app/ml/artifacts/kfp_run,
+        --target, /app/ml/artifacts/current, --state, /app/ml/artifacts/state.json]
+      image: '{{inputs.parameters.image}}'
+      volumeMounts:
+      - {mountPath: /app/ml/artifacts, name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8}
+      - {mountPath: /app/data/weak_feedback, name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc}
+    inputs:
+      parameters:
+      - {name: artifacts_pvc}
+      - {name: feedback_pvc}
+      - {name: image}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.22
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+    volumes:
+    - name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.artifacts_pvc}}'}
+    - name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.feedback_pvc}}'}
+  - name: train-model
+    container:
+      command: [python, ml/train.py, --epochs, '{{inputs.parameters.epochs}}', --batch_size,
+        '{{inputs.parameters.batch_size}}', --out_dir, /app/ml/artifacts/kfp_run,
+        --weak_dir, /app/data/weak_feedback]
+      image: '{{inputs.parameters.image}}'
+      volumeMounts:
+      - {mountPath: /app/ml/artifacts, name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8}
+      - {mountPath: /app/data/weak_feedback, name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc}
+    inputs:
+      parameters:
+      - {name: artifacts_pvc}
+      - {name: batch_size}
+      - {name: epochs}
+      - {name: feedback_pvc}
+      - {name: image}
+    outputs:
+      artifacts:
+      - {name: train-model-metrics, path: /app/ml/artifacts/kfp_run/metrics.json}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.22
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+    volumes:
+    - name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.artifacts_pvc}}'}
+    - name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc
+      persistentVolumeClaim: {claimName: '{{inputs.parameters.feedback_pvc}}'}
+  arguments:
+    parameters:
+    - {name: image, value: 'brain-tumor/api:latest'}
+    - {name: artifacts_pvc, value: brain-artifacts}
+    - {name: feedback_pvc, value: brain-feedback}
+    - {name: epochs, value: '3'}
+    - {name: batch_size, value: '16'}
+    - {name: metric_drop_tol, value: '0.02'}
+    - {name: min_auc, value: '0.7'}
+  serviceAccountName: pipeline-runner
