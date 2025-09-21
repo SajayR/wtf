@@ -118,7 +118,7 @@ def create_app(*args, **kwargs) -> Flask:
     
     # --- THIS IS THE FIX FOR THE CIRCULAR IMPORT ---
     # We import db *inside* the factory, not at the top of the file
-    from . import db_api
+    from . import db
 
     # --- Register Routes with the app instance ---
     
