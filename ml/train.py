@@ -178,7 +178,7 @@ def main(argv=None):
     history = model.fit(ds_train, validation_data=ds_val, epochs=args.epochs, callbacks=[ckpt, early], verbose=2)
 
     # Save SavedModel
-    model.save(out_dir / "model.keras")           # single-file Keras format
+    model.save("artifacts/current/model.keras")           # single-file Keras format
     model.export(out_dir / "saved_model")         # TF SavedModel directory (for Serving/TFLite/etc.)
 
     # Evaluate on val/test

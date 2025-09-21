@@ -50,26 +50,15 @@ def _load_label_map() -> None:
         CLASS_MAP = {"no": 0, "yes": 1}
 
 
-def load_model_artifacts() -> None:
-    """Load model and threshold from artifacts."""
+def load_model_artifacts():
     global model, threshold
-
-    if (MODEL_DIR / "model.keras").exists():
-        model_path = MODEL_DIR / "model.keras"
-    elif (MODEL_DIR / "saved_model").exists():
-        model_path = MODEL_DIR / "saved_model"
-    else:
-        raise FileNotFoundError(f"No model found in {MODEL_DIR}. Run training first.")
-
+    if not (MODEL_DIR / "model.keras").exists():
+        raise FileNotFoundError("model.keras not found")
     from ml.train import preprocess_input
-
     with model_lock:
-        custom_objects = {"preprocess_input": preprocess_input}
-        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+        model = tf.keras.models.load_model(MODEL_DIR / "model.keras",
+                                           custom_objects={"preprocess_input": preprocess_input})
 
-        if THRESHOLD_FILE.exists():
-            threshold = float(THRESHOLD_FILE.read_text().strip())
-        _load_label_map()
 
 
 
