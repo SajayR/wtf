@@ -78,7 +78,7 @@ spec:
       containers:
       - name: api
         image: brain-tumor-app:latest # Our custom-built image
-        imagePullPolicy: Always
+        imagePullPolicy: Never
         ports:
         - containerPort: 8000
         env:
@@ -134,7 +134,7 @@ spec:
       containers:
       - name: trainer
         image: brain-tumor-app:latest # Use the same image
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Never
         command: ["/bin/bash", "-lc", "./scripts/retrain_loop.sh"]
         workingDir: /app
         env:

@@ -17,8 +17,8 @@ import numpy as np
 import tensorflow as tf
 from flask import Flask, jsonify, request
 
-from ml.train import CLASS_MAP, IMG_SIZE, preprocess_input
-from . import db
+# DO NOT import db here. This is the source of the circular import.
+# from . import db 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,20 +29,27 @@ MODEL_FILE = MODEL_DIR / "model.keras"
 LABEL_MAP_FILE = MODEL_DIR / "label_map.json"
 RETRAIN_SCRIPT = Path(os.getenv("RETRAIN_SCRIPT", "ml/retrain.py"))
 
-app = Flask(__name__)
+# --- Globals for the model (managed by the factory) ---
 model_lock = threading.Lock()
 model = None
 threshold = 0.5
 inv_label_map: Dict[int, str] = {0: "no", 1: "yes"}
-
+CLASS_MAP: Dict[str, int] = {"no": 0, "yes": 1} # Define it here
+IMG_SIZE = 224 # Define it here
 
 def _load_label_map() -> None:
     """Load label map from file if available."""
-    global inv_label_map
+    global inv_label_map, CLASS_MAP
     if LABEL_MAP_FILE.exists():
         with LABEL_MAP_FILE.open() as fh:
             loaded = json.load(fh)
         inv_label_map = {int(k): v for k, v in loaded.items()}
+        # Re-create CLASS_MAP from the loaded inverse map
+        CLASS_MAP = {v: k for k, v in inv_label_map.items()}
+    else:
+        # Fallback
+        inv_label_map = {0: "no", 1: "yes"}
+        CLASS_MAP = {"no": 0, "yes": 1}
 
 
 def load_model_artifacts() -> None:
@@ -50,8 +57,20 @@ def load_model_artifacts() -> None:
     global model, threshold
     if not MODEL_FILE.exists():
         raise FileNotFoundError(f"Model file not found at {MODEL_FILE}. Run training first.")
+    
+    # --- THIS IMPORT WAS MISSING ---
+    # Keras needs this to load the model successfully
+    try:
+        from ml.train import preprocess_input
+    except ImportError:
+        print("ERROR: Could not import preprocess_input from ml.train")
+        # Handle error or re-raise
+    
     with model_lock:
-        model = tf.keras.models.load_model(MODEL_FILE)
+        # Pass the custom function to load_model
+        custom_objects = {'preprocess_input': preprocess_input}
+        model = tf.keras.models.load_model(MODEL_FILE, custom_objects=custom_objects)
+        
         if THRESHOLD_FILE.exists():
             threshold = float(THRESHOLD_FILE.read_text().strip())
         _load_label_map()
@@ -72,6 +91,9 @@ def decode_base64_image(data: str) -> bytes:
 
 def image_bytes_to_tensor(image_bytes: bytes) -> np.ndarray:
     """Convert raw image bytes into model-ready numpy array."""
+    # Import here to ensure ml.train is available
+    from ml.train import preprocess_input
+    
     img = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
     img.set_shape([None, None, 3])
     img = tf.image.resize(img, (IMG_SIZE, IMG_SIZE))
@@ -91,108 +113,96 @@ def write_feedback_image(image_bytes: bytes, label: str) -> Path:
     dest.write_bytes(image_bytes)
     return dest
 
-
-@app.route("/health", methods=["GET"])
-def health() -> Tuple[str, int]:
-    return jsonify({"status": "ok", "model_loaded": model is not None}), 200
-
-
-@app.route("/predict", methods=["POST"])
-def predict() -> Tuple[str, int]:
-    payload = request.get_json(force=True)
-    if not payload or "image" not in payload:
-        return jsonify({"error": "missing image"}), 400
-
-    if model is None:
-        return jsonify({"error": "model not loaded"}), 503
-
-    image_bytes = decode_base64_image(payload["image"])
-    arr = image_bytes_to_tensor(image_bytes)
-    with model_lock:
-        probs = model.predict(arr, verbose=0).flatten()
-    prob = float(probs[0])
-    label_idx = int(prob >= threshold)
-    label = inv_label_map.get(label_idx, str(label_idx))
-    db.log_prediction(probability=prob, predicted_label=label, threshold=threshold)
-    return jsonify({
-        "probability": prob,
-        "prediction": label,
-        "threshold": threshold,
-    }), 200
-
-
-@app.route("/feedback", methods=["POST"])
-def feedback() -> Tuple[str, int]:
-    payload = request.get_json(force=True)
-    required = {"image", "correct_label", "predicted_label"}
-    if not payload or not required.issubset(payload):
-        return jsonify({"error": "missing fields"}), 400
-
-    correct_label = payload["correct_label"].lower()
-    predicted_label = payload["predicted_label"].lower()
-    if correct_label not in CLASS_MAP:
-        return jsonify({"error": f"unknown label {correct_label}"}), 400
-
-    image_bytes = decode_base64_image(payload["image"])
-    dest = write_feedback_image(image_bytes, correct_label)
-    probability = float(payload.get("probability", 0.0))
-    db.store_feedback(
-        predicted_label=predicted_label,
-        correct_label=correct_label,
-        probability=probability,
-        image_path=str(dest),
-    )
-    return jsonify({"status": "stored", "path": str(dest)}), 200
-
-
-@app.route("/trigger-retrain", methods=["POST"])
-def trigger_retrain() -> Tuple[str, int]:
-    payload = request.get_json(silent=True) or {}
-    threshold_override = payload.get("threshold")
-    train_args = payload.get("train_args", [])
-    script_path = RETRAIN_SCRIPT if RETRAIN_SCRIPT.is_absolute() else PROJECT_ROOT / RETRAIN_SCRIPT
-    cmd = [sys.executable, str(script_path)]
-    if threshold_override is not None:
-        cmd.extend(["--threshold", str(threshold_override)])
-    for item in train_args:
-        cmd.extend(["--train_arg", item])
-    try:
-        completed = subprocess.run(
-            cmd, capture_output=True, text=True, check=False, cwd=str(PROJECT_ROOT)
-        )
-    except FileNotFoundError as exc:
-        return jsonify({"error": str(exc)}), 500
-
-    response = {
-        "returncode": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
-    }
-    if completed.returncode == 0:
-        try:
-            load_model_artifacts()
-        except FileNotFoundError:
-            response["warning"] = "retrain succeeded but model files missing"
-        return jsonify(response), 200
-    return jsonify(response), 500
-
+# --- Application Factory ---
 
 def create_app(*args, **kwargs) -> Flask:
-    """Application factory for Flask 3.1+"""
-    ensure_dirs()
-    db.init_db()
-    try:
-        load_model_artifacts()
-    except FileNotFoundError as exc:
-        app.logger.warning("model not loaded: %s", exc)
+    """Application factory for Flask."""
+    
+    app = Flask(__name__) # Create the app instance HERE
+    
+    # Import db here, inside the factory
+    from . import db
+
+    # --- Register Routes with the app instance ---
+    
+    @app.route("/health", methods=["GET"])
+    def health() -> Tuple[str, int]:
+        return jsonify({"status": "ok", "model_loaded": model is not None}), 200
+
+    @app.route("/predict", methods=["POST"])
+    def predict() -> Tuple[str, int]:
+        payload = request.get_json(force=True)
+        if not payload or "image" not in payload:
+            return jsonify({"error": "missing image"}), 400
+
+        if model is None:
+            return jsonify({"error": "model not loaded"}), 503
+
+        image_bytes = decode_base64_image(payload["image"])
+        arr = image_bytes_to_tensor(image_bytes)
+        with model_lock:
+            # Check model is not None again inside lock for safety
+            if model is None:
+                return jsonify({"error": "model not loaded"}), 503
+            probs = model.predict(arr, verbose=0).flatten()
+        
+        prob = float(probs[0])
+        label_idx = int(prob >= threshold)
+        label = inv_label_map.get(label_idx, str(label_idx))
+        db.log_prediction(probability=prob, predicted_label=label, threshold=threshold)
+        return jsonify({
+            "probability": prob,
+            "prediction": label,
+            "threshold": threshold,
+        }), 200
+
+    @app.route("/feedback", methods=["POST"])
+    def feedback() -> Tuple[str, int]:
+        payload = request.get_json(force=True)
+        required = {"image", "correct_label", "predicted_label"}
+        if not payload or not required.issubset(payload):
+            return jsonify({"error": "missing fields"}), 400
+
+        correct_label = payload["correct_label"].lower()
+        predicted_label = payload["predicted_label"].lower()
+        if correct_label not in CLASS_MAP:
+            return jsonify({"error": f"unknown label {correct_label}"}), 400
+
+        image_bytes = decode_base64_image(payload["image"])
+        dest = write_feedback_image(image_bytes, correct_label)
+        probability = float(payload.get("probability", 0.0))
+        db.store_feedback(
+            predicted_label=predicted_label,
+            correct_label=correct_label,
+            probability=probability,
+            image_path=str(dest),
+        )
+        return jsonify({"status": "stored", "path": str(dest)}), 200
+
+    @app.route("/trigger-retrain", methods=["POST"])
+    def trigger_retrain() -> Tuple[str, int]:
+        app.logger.info("Received request to reload model artifacts.")
+        try:
+            load_model_artifacts()
+            app.logger.info("Successfully reloaded model artifacts.")
+            return jsonify({"status": "model_reloaded"}), 200
+        except FileNotFoundError as exc:
+            app.logger.warning("Failed to reload artifacts: %s", exc)
+            return jsonify({"error": "model artifacts not found, training may still be in progress"}), 503
+        except Exception as exc:
+            app.logger.error("An unexpected error occurred during model reload: %s", exc, exc_info=True)
+            return jsonify({"error": str(exc)}), 500
+
+    # --- Initialization ---
+    with app.app_context():
+        ensure_dirs()
+        db.init_db()
+        try:
+            load_model_artifacts()
+            app.logger.info("Model loaded successfully on startup.")
+        except FileNotFoundError as exc:
+            app.logger.warning("model not loaded on startup: %s", exc)
+        except Exception as exc:
+            app.logger.error("Failed to load model on startup: %s", exc, exc_info=True)
+    
     return app
-
-
-
-def main() -> None:
-    create_app()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "6000")))
-
-
-if __name__ == "__main__":
-    main()

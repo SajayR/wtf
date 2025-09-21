@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --upgrade pip \
     && pip install uv \
-    && uv pip install -r requirements.txt
+    && uv pip install --system -r requirements.txt
 
 COPY api ./api
 COPY ml ./ml
