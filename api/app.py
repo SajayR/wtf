@@ -53,21 +53,24 @@ def _load_label_map() -> None:
 def load_model_artifacts() -> None:
     """Load model and threshold from artifacts."""
     global model, threshold
-    if not MODEL_FILE.exists():
-        raise FileNotFoundError(f"Model file not found at {MODEL_FILE}. Run training first.")
-    
-    # --- THIS IS THE FIX FOR THE *NEXT* ERROR ---
-    # We must import the custom function your model uses
+
+    if (MODEL_DIR / "model.keras").exists():
+        model_path = MODEL_DIR / "model.keras"
+    elif (MODEL_DIR / "saved_model").exists():
+        model_path = MODEL_DIR / "saved_model"
+    else:
+        raise FileNotFoundError(f"No model found in {MODEL_DIR}. Run training first.")
+
     from ml.train import preprocess_input
-    
+
     with model_lock:
-        # And we must tell Keras about it
-        custom_objects = {'preprocess_input': preprocess_input}
-        model = tf.keras.models.load_model(MODEL_FILE, custom_objects=custom_objects)
-        
+        custom_objects = {"preprocess_input": preprocess_input}
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+
         if THRESHOLD_FILE.exists():
             threshold = float(THRESHOLD_FILE.read_text().strip())
         _load_label_map()
+
 
 
 def ensure_dirs() -> None:
@@ -115,7 +118,7 @@ def create_app(*args, **kwargs) -> Flask:
     
     # --- THIS IS THE FIX FOR THE CIRCULAR IMPORT ---
     # We import db *inside* the factory, not at the top of the file
-    from . import db
+    from . import db_api
 
     # --- Register Routes with the app instance ---
     
