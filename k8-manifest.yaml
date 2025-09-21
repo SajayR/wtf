@@ -78,7 +78,7 @@ spec:
       containers:
       - name: api
         image: brain-tumor-app:latest # Our custom-built image
-        imagePullPolicy: IfNotPresent # Tells K8s to use the local image
+        imagePullPolicy: Always
         ports:
         - containerPort: 8000
         env:
