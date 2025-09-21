@@ -11,7 +11,11 @@ fi
 # Set docker environment
 eval $(minikube docker-env)
 
-# Deploy if not already deployed
+# Build the application image
+echo "🔨 Building application image..."
+docker build -t brain-tumor/api:latest .
+
+# Deploy application
 echo "🔧 Deploying application..."
 kubectl apply -k k8s/
 
