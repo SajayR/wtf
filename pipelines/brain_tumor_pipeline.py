@@ -43,6 +43,10 @@ def brain_tumor_pipeline(
         file_outputs={"metrics": f"{ARTIFACT_DIR}/kfp_run/metrics.json"},
     )
     train = _add_shared_volumes(train, artifacts_pvc, feedback_pvc)
+    train.container.set_memory_request('12Gi')
+    train.container.set_memory_limit('12Gi')
+    train.container.set_cpu_request('4')
+    train.container.set_cpu_limit('4')
 
     evaluate = dsl.ContainerOp(
         name="evaluate-metrics",
@@ -61,6 +65,9 @@ def brain_tumor_pipeline(
         ],
     )
     evaluate = _add_shared_volumes(evaluate, artifacts_pvc, feedback_pvc)
+    evaluate.container.set_memory_request('1Gi')
+    evaluate.container.set_memory_limit('2Gi')
+    evaluate.container.set_cpu_request('1')
     evaluate.after(train)
 
     promote = dsl.ContainerOp(
@@ -78,4 +85,8 @@ def brain_tumor_pipeline(
         ],
     )
     promote = _add_shared_volumes(promote, artifacts_pvc, feedback_pvc)
+    promote.container.set_memory_request('512Mi')
+    promote.container.set_memory_limit('1Gi')
+    promote.container.set_cpu_request('0.5')
     promote.after(evaluate)
+    

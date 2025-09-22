@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
   generateName: brain-tumor-retrain-
-  annotations: {pipelines.kubeflow.org/kfp_sdk_version: 1.8.22, pipelines.kubeflow.org/pipeline_compilation_time: '2025-09-19T11:27:40.927168',
+  annotations: {pipelines.kubeflow.org/kfp_sdk_version: 1.8.22, pipelines.kubeflow.org/pipeline_compilation_time: '2025-09-22T06:00:24.128439',
     pipelines.kubeflow.org/pipeline_spec: '{"inputs": [{"default": "brain-tumor/api:latest",
       "name": "image", "optional": true, "type": "String"}, {"default": "brain-artifacts",
       "name": "artifacts_pvc", "optional": true, "type": "String"}, {"default": "brain-feedback",
@@ -60,6 +60,9 @@ spec:
         --state, /app/ml/artifacts/state.json, --min_auc, '{{inputs.parameters.min_auc}}',
         --drop_tol, '{{inputs.parameters.metric_drop_tol}}']
       image: '{{inputs.parameters.image}}'
+      resources:
+        limits: {memory: 2Gi}
+        requests: {memory: 1Gi, cpu: '1'}
       volumeMounts:
       - {mountPath: /app/ml/artifacts, name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8}
       - {mountPath: /app/data/weak_feedback, name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc}
@@ -85,6 +88,9 @@ spec:
       command: [python, ml/promote_model.py, --source, /app/ml/artifacts/kfp_run,
         --target, /app/ml/artifacts/current, --state, /app/ml/artifacts/state.json]
       image: '{{inputs.parameters.image}}'
+      resources:
+        limits: {memory: 1Gi}
+        requests: {memory: 512Mi, cpu: '0.5'}
       volumeMounts:
       - {mountPath: /app/ml/artifacts, name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8}
       - {mountPath: /app/data/weak_feedback, name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc}
@@ -109,6 +115,9 @@ spec:
         '{{inputs.parameters.batch_size}}', --out_dir, /app/ml/artifacts/kfp_run,
         --weak_dir, /app/data/weak_feedback]
       image: '{{inputs.parameters.image}}'
+      resources:
+        limits: {memory: 12Gi, cpu: '4'}
+        requests: {memory: 12Gi, cpu: '4'}
       volumeMounts:
       - {mountPath: /app/ml/artifacts, name: pvolume-241067189defe784820dfabe10bdcc91fde5c6b516423cfb2659ce8}
       - {mountPath: /app/data/weak_feedback, name: pvolume-6f097004d237b995c8823ffb1eabbbdbb7433c8433890bfd03c2cdc}
