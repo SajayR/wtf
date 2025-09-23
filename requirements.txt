@@ -7,3 +7,5 @@ sqlalchemy>=2.0
 psycopg2-binary>=2.9
 kfp>=2.2
 Pillow>=9.5
+Flask>=3.0
+requests>=2.31
