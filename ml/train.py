@@ -5,7 +5,11 @@ import numpy as np
 import tensorflow as tf
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, confusion_matrix
 from tensorflow.keras.applications.efficientnet import preprocess_input
-
+import warnings
+warnings.filterwarnings("ignore")
+import os, tensorflow as tf
+tf.config.threading.set_intra_op_parallelism_threads(os.cpu_count())
+tf.config.threading.set_inter_op_parallelism_threads(os.cpu_count())
 IMG_SIZE = 224
 CLASS_MAP = {"no": 0, "yes": 1}
 INV_CLASS_MAP = {v: k for k, v in CLASS_MAP.items()}
@@ -44,7 +48,7 @@ def augment(img):
 def make_ds(files, labels, batch, shuffle=True, augment_on=False, sample_weight=1.0):
     """ Creates a TensorFlow Dataset from file paths and labels. Includes options for shuffling, augmentation, and sample weighting. """
     ds = tf.data.Dataset.from_tensor_slices((files, labels))
-    if shuffle:
+    if shuffle and len(files) > 0:
         ds = ds.shuffle(buffer_size=min(1000, len(files)))
     def _map(f, y):
         x = decode_and_resize(f)
@@ -136,7 +140,7 @@ def main(argv=None):
     p.add_argument("--data_dir", default="data")
     p.add_argument("--weak_dir", default="data/weak_feedback")
     p.add_argument("--out_dir", default="ml/artifacts/run")
-    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weak_weight", type=float, default=0.3)
@@ -153,6 +157,13 @@ def main(argv=None):
     tr_files, tr_labels = list_images(os.path.join(args.data_dir, "train"))
     val_files, val_labels = list_images(os.path.join(args.data_dir, "val"))
     te_files, te_labels = list_images(os.path.join(args.data_dir, "test"))
+
+    if not tr_files:
+        raise SystemExit(f"No training images found under {args.data_dir}/train")
+    if not val_files:
+        raise SystemExit(f"No validation images found under {args.data_dir}/val")
+    if not te_files:
+        raise SystemExit(f"No test images found under {args.data_dir}/test")
     weak_files, weak_labels = [], []
 
     if os.path.isdir(args.weak_dir):
