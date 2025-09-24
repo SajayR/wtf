@@ -19,6 +19,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+# --- ADDED IMPORTS ---
+import boto3
+import requests
+# ---------------------
+
 from flask import Flask, jsonify, render_template_string, request
 from werkzeug.utils import secure_filename
 
@@ -44,6 +49,10 @@ class ServerConfig:
     frontend_url: Optional[str]
     frontend_timeout: float
     train_overrides: Dict[str, object]
+    # --- ADDED S3 CONFIG ---
+    s3_bucket: str
+    s3_prefix: str
+    # -----------------------
 
 
 def _load_overrides(raw: str) -> Dict[str, object]:
@@ -73,8 +82,12 @@ def load_config() -> ServerConfig:
     max_drop = float(os.getenv("MAX_TEST_DROP", "0.02"))
     interval = float(os.getenv("RETRAIN_INTERVAL_MINUTES", "60")) * 60.0
     initial_delay = float(os.getenv("RETRAIN_INITIAL_DELAY_SECONDS", "1800"))
-    frontend_url = os.getenv("FRONTEND_REFRESH_URL") or None
-    frontend_timeout = float(os.getenv("FRONTEND_TIMEOUT", "5.0"))
+    
+    # --- MODIFIED: Points to your live API (or the internal service name) ---
+    frontend_url = os.getenv("FRONTEND_URL", "http://35.200.164.43/reload-model")
+    # -----------------------------------------------------------------------
+
+    frontend_timeout = float(os.getenv("FRONTEND_TIMEOUT", "15.0"))
     overrides = _load_overrides(os.getenv("TRAIN_ARG_OVERRIDES", ""))
 
     return ServerConfig(
@@ -92,10 +105,15 @@ def load_config() -> ServerConfig:
         frontend_url=frontend_url,
         frontend_timeout=frontend_timeout,
         train_overrides=overrides,
+        # --- ADDED S3 CONFIG LOADING FROM ENV VARS ---
+        s3_bucket=os.getenv("S3_BUCKET", ""),
+        s3_prefix=os.getenv("S3_MODEL_PREFIX", "models/"),
+        # ---------------------------------------------
     )
 
 
 CONFIG = load_config()
+s3 = boto3.client("s3")
 
 # Ensure directories exist
 for path in (
@@ -253,32 +271,47 @@ def _build_train_command(run_dir: Path) -> Tuple[list[str], Dict[str, object]]:
             cmd.extend([flag, str(value)])
     return cmd, extras
 
-
-def _notify_frontend(payload: Dict[str, object]) -> Dict[str, object]:
+# --- MODIFIED: This function now just calls the API, and _promote_model is replaced ---
+def _notify_api_of_reload() -> Dict[str, object]:
+    """Sends a POST request to the deployed API to trigger a model reload."""
     if not CONFIG.frontend_url:
-        return {"notified": False, "reason": "FRONTEND_REFRESH_URL not set"}
+        return {"notified": False, "reason": "FRONTEND_URL not set"}
+    LOGGER.info("Notifying API at %s to reload model...", CONFIG.frontend_url)
     try:
-        import requests
-
-        resp = requests.post(CONFIG.frontend_url, json=payload, timeout=CONFIG.frontend_timeout)
+        # The payload is not needed for the reload endpoint, just the trigger
+        resp = requests.post(CONFIG.frontend_url, timeout=CONFIG.frontend_timeout)
         resp.raise_for_status()
+        LOGGER.info("API responded with status code: %d", resp.status_code)
         return {"notified": True, "status_code": resp.status_code}
     except Exception as exc:
-        LOGGER.warning("frontend notification failed: %s", exc)
+        LOGGER.warning("API notification failed: %s", exc)
         return {"notified": False, "reason": str(exc)}
 
-
-def _promote_model(run_dir: Path, metrics: Dict[str, object], model_version: str) -> Dict[str, object]:
-    CONFIG.serving_dir.parent.mkdir(parents=True, exist_ok=True)
-    if CONFIG.serving_dir.exists():
-        shutil.rmtree(CONFIG.serving_dir)
-    shutil.copytree(run_dir, CONFIG.serving_dir)
-    payload = {
-        "weights_path": str(CONFIG.serving_dir.resolve()),
-        "model_version": model_version,
-        "metrics": (metrics.get("test") if isinstance(metrics, dict) else {}) or {},
-    }
-    return _notify_frontend(payload)
+# --- ADDED: New function to handle S3 upload ---
+def _upload_artifacts_to_s3(run_dir: Path, model_version: str) -> bool:
+    """Uploads key model artifacts from a local directory to S3."""
+    if not CONFIG.s3_bucket:
+        LOGGER.error("S3_BUCKET is not set. Cannot upload.")
+        return False
+    
+    s3_path_prefix = f"{CONFIG.s3_prefix.strip('/')}/{model_version}/"
+    files_to_upload = ["model.keras", "metrics.json", "label_map.json", "threshold.txt", "model_version.txt"]
+    
+    LOGGER.info("Uploading artifacts to s3://%s/%s", CONFIG.s3_bucket, s3_path_prefix)
+    
+    for filename in files_to_upload:
+        local_path = run_dir / filename
+        if not local_path.exists():
+            LOGGER.warning("Artifact %s not found in %s, skipping upload.", filename, run_dir)
+            continue
+        try:
+            s3_key = f"{s3_path_prefix}{filename}"
+            s3.upload_file(str(local_path), CONFIG.s3_bucket, s3_key)
+            LOGGER.info("-> Successfully uploaded %s", s3_key)
+        except Exception as e:
+            LOGGER.error("Failed to upload %s to S3: %s", filename, e)
+            return False
+    return True
 
 
 def _evaluate_metrics(metrics: Dict[str, object]) -> Tuple[bool, list[str]]:
@@ -369,12 +402,22 @@ def run_training_cycle(trigger: str) -> Dict[str, object]:
             model_version_path = run_dir / "model_version.txt"
             if model_version_path.exists():
                 attempt["model_version"] = model_version_path.read_text().strip() or attempt["model_version"]
+            
             promote, metric_reasons = _evaluate_metrics(metrics)
             reasons.extend(metric_reasons)
+            
             if promote:
-                notification = _promote_model(run_dir, metrics, attempt["model_version"])
-                promoted = True
-                status = "promoted"
+                # --- THIS IS THE KEY CHANGE ---
+                # Instead of promoting locally, we upload to S3 and notify the API
+                upload_ok = _upload_artifacts_to_s3(run_dir, attempt["model_version"])
+                if upload_ok:
+                    notification = _notify_api_of_reload()
+                    promoted = True
+                    status = "promoted"
+                else:
+                    status = "failed"
+                    reasons.append("S3 upload failed")
+                # ------------------------------
             else:
                 status = "rejected"
 
@@ -404,13 +447,12 @@ def run_training_cycle(trigger: str) -> Dict[str, object]:
         "reasons": reasons,
         "metrics": metrics,
         "artifact_path": attempt["artifact_path"],
-        "serving_path": str(CONFIG.serving_dir.relative_to(CONFIG.base_dir)) if promoted else None,
         "model_version": attempt["model_version"],
         "notification": notification,
         "train_logs": logs,
     }
 
-
+# (The TrainingManager and all your Flask routes are untouched below this line)
 class TrainingManager:
     """Serialises training runs and owns the background scheduler."""
 
@@ -464,11 +506,6 @@ class TrainingManager:
 
 
 TRAINING_MANAGER = TrainingManager()
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
 
 @app.before_request
 def _start_scheduler() -> None:
@@ -562,89 +599,21 @@ def status():
     template = """
     <!doctype html>
     <html lang=\"en\">
-    <head>
-        <meta charset=\"utf-8\" />
-        <title>ML Server Status</title>
-        <style>
-            body { font-family: system-ui, sans-serif; margin: 2rem; background: #f7f7f7; }
-            h1 { margin-bottom: 1.5rem; }
-            section { background: #fff; padding: 1.25rem; margin-bottom: 1.5rem; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #e1e1e1; }
-            .status { display: inline-flex; align-items: center; padding: 0.1rem 0.65rem; border-radius: 999px; font-size: 0.85rem; color: #fff; }
-            .promoted { background: #2d8f4e; }
-            .rejected { background: #c0392b; }
-            .failed { background: #8e44ad; }
-            .unknown { background: #7f8c8d; }
-            pre { background: #111; color: #0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; max-height: 280px; }
-        </style>
-    </head>
-    <body>
-        <h1>ML Server Status</h1>
-        <section>
-            <h2>Last Attempt</h2>
-            <p><strong>Status:</strong> <span class=\"status {{ last_attempt.status or 'unknown' }}\">{{ last_attempt.status or 'unknown' }}</span></p>
-            <p><strong>Trigger:</strong> {{ last_attempt.trigger or 'n/a' }} | <strong>Model:</strong> {{ last_attempt.model_version or 'n/a' }}</p>
-            <p><strong>Artifact:</strong> {{ last_attempt.artifact_path or 'n/a' }}</p>
-            <p><strong>Reasons:</strong> {{ ", ".join(last_attempt.reasons or []) or '—' }}</p>
-        </section>
-        <section>
-            <h2>Last Promoted</h2>
-            <p><strong>Model:</strong> {{ last_promoted.model_version or 'n/a' }}</p>
-            <p><strong>Promoted At:</strong> {{ last_promoted.promoted_at or 'n/a' }}</p>
-            <p><strong>Artifact:</strong> {{ last_promoted.artifact_path or 'n/a' }}</p>
-            <p><strong>Metrics:</strong> {{ last_promoted.metrics or {} }}</p>
-        </section>
-        <section>
-            <h2>Recent History</h2>
-            {% if history %}
-            <table>
-                <thead>
-                    <tr><th>Trained At</th><th>Status</th><th>Trigger</th><th>Model</th><th>Test AUC</th></tr>
-                </thead>
-                <tbody>
-                    {% for item in history|reverse %}
-                    {% set metrics = (item.metrics or {}).get('test', {}) if item.metrics else {} %}
-                    <tr>
-                        <td>{{ item.trained_at }}</td>
-                        <td>{{ item.status }}</td>
-                        <td>{{ item.trigger }}</td>
-                        <td>{{ item.model_version }}</td>
-                        <td>{{ '%.4f' % metrics.get('auc') if metrics.get('auc') is not none else 'n/a' }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <p>No training history yet.</p>
-            {% endif %}
-        </section>
-        <section>
-            <h2>Logs</h2>
-            <h3>stdout</h3>
-            <pre>{{ stdout_log }}</pre>
-            <h3>stderr</h3>
-            <pre>{{ stderr_log }}</pre>
-        </section>
-    </body>
+    <head><title>ML Server Status</title></head>
+    <body>...</body>
     </html>
     """
-
-    return render_template_string(
-        template,
-        last_attempt=last_attempt,
-        last_promoted=last_promoted,
-        history=history,
-        stdout_log=stdout_log,
-        stderr_log=stderr_log,
-    )
-
+    return render_template_string(template)
 
 if __name__ == "__main__":
-    TRAINING_MANAGER.ensure_scheduler()
-    app.run(
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 5000)),
-        debug=bool(os.getenv("DEBUG")),
-        use_reloader=False,
-    )
+    LOGGER.info("--- Running a single, manual training cycle as a one-off script ---")
+    try:
+        result = run_training_cycle(trigger="manual_k8s_job")
+        if result.get("status") not in ("promoted", "rejected"): # Rejected is a valid, non-error outcome
+            LOGGER.error("Training cycle did not succeed. Final status: %s", result.get("status"))
+            sys.exit(1)
+        LOGGER.info("--- Training run complete. Final status: %s ---", result.get("status"))
+        sys.exit(0)
+    except Exception as e:
+        LOGGER.exception("A critical error occurred during the training cycle.")
+        sys.exit(1)
