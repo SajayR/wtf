@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+import boto3
+import requests
 
 from flask import Flask, jsonify, render_template_string, request
 try:
@@ -80,7 +82,7 @@ def load_config() -> ServerConfig:
     max_drop = float(os.getenv("MAX_TEST_DROP", "0.02"))
     interval = float(os.getenv("RETRAIN_INTERVAL_MINUTES", "60")) * 60.0
     initial_delay = float(os.getenv("RETRAIN_INITIAL_DELAY_SECONDS", "1800"))
-    frontend_url = os.getenv("FRONTEND_REFRESH_URL") or None
+    frontend_url = "http://35.200.164.43/refresh-model"
     frontend_timeout = float(os.getenv("FRONTEND_TIMEOUT", "5.0"))
     overrides = _load_overrides(os.getenv("TRAIN_ARG_OVERRIDES", ""))
 
@@ -294,26 +296,15 @@ def _notify_frontend(payload: Dict[str, object]) -> Dict[str, object]:
 
 
 def _promote_model(run_dir: Path, metrics: Dict[str, object], model_version: str) -> Tuple[str, Dict[str, object]]:
-    """Upload the run directory to S3 and notify the frontend.
-
-    Returns a tuple of (s3_uri, notification_result).
-    """
+    """Upload the run directory to S3 and notify the frontend."""
     bucket = CONFIG.s3_bucket
-    prefix_root = CONFIG.s3_model_prefix.rstrip("/")
     if not bucket:
         raise RuntimeError("S3 bucket not configured; set S3_BUCKET env var")
 
-    # Promote to a stable "current" prefix in S3
-    key_prefix = f"{prefix_root}/current/"
+    # Use a fixed "/current/" path instead of a unique model_version
+    key_prefix = f"{CONFIG.s3_model_prefix.rstrip('/')}/current/"
     s3_uri = f"s3://{bucket}/{key_prefix}"
-
-    # Upload recursively
-    try:
-        import boto3  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(
-            "boto3 not available; add boto3 to requirements and install"
-        ) from exc
+    LOGGER.info("Uploading artifacts to fixed path: %s", s3_uri)
 
     s3 = boto3.client("s3")
     for path in run_dir.rglob("*"):
@@ -322,11 +313,7 @@ def _promote_model(run_dir: Path, metrics: Dict[str, object], model_version: str
             key = f"{key_prefix}{rel}"
             s3.upload_file(str(path), bucket, key)
 
-    payload = {
-        "weights_path": s3_uri,
-        "model_version": model_version,
-        "metrics": (metrics.get("test") if isinstance(metrics, dict) else {}) or {},
-    }
+    payload = { "model_version": model_version, "metrics": metrics.get("test", {}) }
     notification = _notify_frontend(payload)
     return s3_uri, notification
 
