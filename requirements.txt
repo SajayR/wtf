@@ -9,3 +9,5 @@ kfp>=2.2
 Pillow>=9.5
 Flask>=3.0
 requests>=2.31
+boto3>=1.28
+python-dotenv>=1.0

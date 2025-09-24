@@ -8,7 +8,6 @@ import binascii
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -20,6 +19,12 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from flask import Flask, jsonify, render_template_string, request
+try:
+    # Load environment variables from .env (auto-discover from project root)
+    from dotenv import load_dotenv, find_dotenv  # type: ignore
+    load_dotenv(find_dotenv(usecwd=True))  # safe no-op if not found
+except Exception:
+    pass
 from werkzeug.utils import secure_filename
 
 
@@ -44,6 +49,8 @@ class ServerConfig:
     frontend_url: Optional[str]
     frontend_timeout: float
     train_overrides: Dict[str, object]
+    s3_bucket: Optional[str]
+    s3_model_prefix: str
 
 
 def _load_overrides(raw: str) -> Dict[str, object]:
@@ -77,6 +84,10 @@ def load_config() -> ServerConfig:
     frontend_timeout = float(os.getenv("FRONTEND_TIMEOUT", "5.0"))
     overrides = _load_overrides(os.getenv("TRAIN_ARG_OVERRIDES", ""))
 
+    # S3 configuration
+    s3_bucket = os.getenv("S3_BUCKET", "med-aid") or None
+    s3_prefix = os.getenv("S3_MODEL_PREFIX", "models/")
+
     return ServerConfig(
         base_dir=base_dir,
         data_dir=data_dir,
@@ -92,6 +103,8 @@ def load_config() -> ServerConfig:
         frontend_url=frontend_url,
         frontend_timeout=frontend_timeout,
         train_overrides=overrides,
+        s3_bucket=s3_bucket,
+        s3_model_prefix=s3_prefix,
     )
 
 
@@ -280,17 +293,42 @@ def _notify_frontend(payload: Dict[str, object]) -> Dict[str, object]:
         return {"notified": False, "reason": str(exc)}
 
 
-def _promote_model(run_dir: Path, metrics: Dict[str, object], model_version: str) -> Dict[str, object]:
-    CONFIG.serving_dir.parent.mkdir(parents=True, exist_ok=True)
-    if CONFIG.serving_dir.exists():
-        shutil.rmtree(CONFIG.serving_dir)
-    shutil.copytree(run_dir, CONFIG.serving_dir)
+def _promote_model(run_dir: Path, metrics: Dict[str, object], model_version: str) -> Tuple[str, Dict[str, object]]:
+    """Upload the run directory to S3 and notify the frontend.
+
+    Returns a tuple of (s3_uri, notification_result).
+    """
+    bucket = CONFIG.s3_bucket
+    prefix_root = CONFIG.s3_model_prefix.rstrip("/")
+    if not bucket:
+        raise RuntimeError("S3 bucket not configured; set S3_BUCKET env var")
+
+    # Promote to a stable "current" prefix in S3
+    key_prefix = f"{prefix_root}/current/"
+    s3_uri = f"s3://{bucket}/{key_prefix}"
+
+    # Upload recursively
+    try:
+        import boto3  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "boto3 not available; add boto3 to requirements and install"
+        ) from exc
+
+    s3 = boto3.client("s3")
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            rel = path.relative_to(run_dir).as_posix()
+            key = f"{key_prefix}{rel}"
+            s3.upload_file(str(path), bucket, key)
+
     payload = {
-        "weights_path": str(CONFIG.serving_dir.resolve()),
+        "weights_path": s3_uri,
         "model_version": model_version,
         "metrics": (metrics.get("test") if isinstance(metrics, dict) else {}) or {},
     }
-    return _notify_frontend(payload)
+    notification = _notify_frontend(payload)
+    return s3_uri, notification
 
 
 def _evaluate_metrics(metrics: Dict[str, object]) -> Tuple[bool, list[str]]:
@@ -416,9 +454,10 @@ def run_training_cycle(trigger: str) -> Dict[str, object]:
             promote, metric_reasons = _evaluate_metrics(metrics)
             reasons.extend(metric_reasons)
             if promote:
-                notification = _promote_model(run_dir, metrics, attempt["model_version"])
+                s3_uri, notification = _promote_model(run_dir, metrics, attempt["model_version"])
                 promoted = True
                 status = "promoted"
+                attempt["serving_path"] = s3_uri
             else:
                 status = "rejected"
 
@@ -437,6 +476,7 @@ def run_training_cycle(trigger: str) -> Dict[str, object]:
             "artifact_path": attempt["artifact_path"],
             "model_version": attempt["model_version"],
             "metrics": metrics,
+            "serving_path": attempt.get("serving_path"),
             "promoted_at": datetime.utcnow().isoformat() + "Z",
         }
     _save_state(state)
@@ -448,7 +488,7 @@ def run_training_cycle(trigger: str) -> Dict[str, object]:
         "reasons": reasons,
         "metrics": metrics,
         "artifact_path": attempt["artifact_path"],
-        "serving_path": str(CONFIG.serving_dir.relative_to(CONFIG.base_dir)) if promoted else None,
+        "serving_path": attempt.get("serving_path") if promoted else None,
         "model_version": attempt["model_version"],
         "notification": notification,
         "train_logs": logs,
@@ -637,6 +677,7 @@ def status():
             <p><strong>Model:</strong> {{ last_promoted.model_version or 'n/a' }}</p>
             <p><strong>Promoted At:</strong> {{ last_promoted.promoted_at or 'n/a' }}</p>
             <p><strong>Artifact:</strong> {{ last_promoted.artifact_path or 'n/a' }}</p>
+            <p><strong>Serving:</strong> {{ last_promoted.serving_path or 'n/a' }}</p>
             <p><strong>Metrics:</strong> {{ last_promoted.metrics or {} }}</p>
         </section>
         <section>
