@@ -114,6 +114,7 @@ POSITIVE_FEEDBACK = {"yes", "y", "true", "1", "upvote", "positive", "correct", "
 NEGATIVE_FEEDBACK = {"no", "n", "false", "0", "downvote", "negative", "incorrect", "bad"}
 
 STATE_LOCK = threading.Lock()
+REQUIRED_WEAK_FEEDBACK = int(os.getenv("MIN_WEAK_FEEDBACK_IMAGES", "5"))
 
 app = Flask(__name__)
 app.config.update(
@@ -193,6 +194,17 @@ def _read_tail(path: Path, max_chars: int = 4000) -> str:
     if len(text) > max_chars:
         text = "(truncated)\n" + text[-max_chars:]
     return text
+
+
+def _count_feedback_images() -> int:
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+    total = 0
+    for path in CONFIG.weak_feedback_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() in exts:
+            total += 1
+            if total >= REQUIRED_WEAK_FEEDBACK:
+                break
+    return total
 
 
 def _stream_process_logs(proc: subprocess.Popen[str], run_token: str) -> Tuple[str, str]:
@@ -309,6 +321,38 @@ def _evaluate_metrics(metrics: Dict[str, object]) -> Tuple[bool, list[str]]:
 
 
 def run_training_cycle(trigger: str) -> Dict[str, object]:
+    feedback_count = _count_feedback_images()
+    if trigger != "startup" and feedback_count < REQUIRED_WEAK_FEEDBACK:
+        reason = (
+            f"insufficient weak feedback images: {feedback_count} < {REQUIRED_WEAK_FEEDBACK}"
+        )
+        attempt = {
+            "trained_at": datetime.utcnow().isoformat() + "Z",
+            "trigger": trigger,
+            "status": "skipped",
+            "reasons": [reason],
+            "weak_feedback_count": feedback_count,
+        }
+
+        state = _load_state()
+        history = state.setdefault("history", [])
+        history.append(attempt)
+        state["last_attempt"] = attempt
+        _save_state(state)
+
+        LOGGER.info("skipping training (%s)", reason)
+        return {
+            "status": "skipped",
+            "promoted": False,
+            "reasons": [reason],
+            "metrics": {},
+            "artifact_path": None,
+            "serving_path": None,
+            "model_version": None,
+            "notification": {"notified": False, "reason": "training skipped"},
+            "train_logs": {"stdout": "", "stderr": "", "returncode": None},
+        }
+
     run_token = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + f"_{uuid.uuid4().hex[:6]}"
     run_dir = CONFIG.artifacts_root / run_token
     run_dir.mkdir(parents=True, exist_ok=True)
